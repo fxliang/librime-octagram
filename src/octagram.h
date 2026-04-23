@@ -36,10 +36,13 @@ class OctagramComponent : public Grammar::Component {
 
   Octagram* Create(Config* config) override;
 
-  GramDb* GetDb(const string& language);
+  string ResolveLanguageResourceId(Config* config, const string& language) const;
+
+  virtual GramDb* GetDb(const string& language);
 
  private:
   map<string, the<GramDb>> db_by_language_;
+  set<string> unavailable_languages_;
 };
 
 }  // namespace rime
