@@ -4,81 +4,17 @@
 #include <algorithm>
 #include <filesystem>
 #include <rime/config.h>
+#if __has_include(<rime/namespace_resource_utils.h>)
+#include <rime/namespace_resource_utils.h>
+#define RIME_HAS_NAMESPACE_RESOURCE_UTILS 1
+#else
+#define RIME_HAS_NAMESPACE_RESOURCE_UTILS 0
+#endif
 #include <rime/resource.h>
 #include <rime/service.h>
 #include <utf8.h>
 
 namespace rime {
-
-namespace {
-
-bool IsRelativePathUnderRoot(const path& full_path, const path& root_path) {
-  if (full_path.empty() || root_path.empty()) {
-    return false;
-  }
-  const auto rel = std::filesystem::absolute(full_path).lexically_relative(
-      std::filesystem::absolute(root_path));
-  if (rel.empty()) {
-    return false;
-  }
-  const auto rel_text = rel.generic_u8string();
-  return rel_text != ".." && rel_text.rfind("../", 0) != 0;
-}
-
-string SchemaNamespace(Config* config) {
-  if (!config) {
-    return string();
-  }
-  string schema_id;
-  if (config->GetString("schema/schema_id", &schema_id)) {
-    auto ns = path(schema_id).parent_path();
-    if (!ns.empty()) {
-      return ns.generic_u8string();
-    }
-  }
-
-  const auto& config_path = config->file_path();
-  auto parent_path = config_path.parent_path();
-  if (parent_path.empty()) {
-    return string();
-  }
-
-  auto& deployer = Service::instance().deployer();
-  const vector<path> roots = {deployer.staging_dir, deployer.prebuilt_data_dir,
-                              deployer.user_data_dir, deployer.shared_data_dir};
-  for (const auto& root : roots) {
-    if (!IsRelativePathUnderRoot(config_path, root)) {
-      continue;
-    }
-    auto relative_parent =
-        std::filesystem::absolute(parent_path).lexically_relative(
-            std::filesystem::absolute(root));
-    if (!relative_parent.empty()) {
-      auto relative_parent_text = relative_parent.generic_u8string();
-      if (relative_parent_text != ".." &&
-          relative_parent_text.rfind("../", 0) != 0) {
-        return relative_parent_text;
-      }
-    }
-  }
-  return string();
-}
-
-bool NamespaceResourcesOnly(Config* config) {
-  if (!config) {
-    return false;
-  }
-  bool namespace_resources_only = false;
-  return config->GetBool("schema/namespace_resources_only",
-                         &namespace_resources_only) &&
-         namespace_resources_only;
-}
-
-bool ExistsInResolver(ResourceResolver* resolver, const string& resource_id) {
-  return resolver && std::filesystem::exists(resolver->ResolvePath(resource_id));
-}
-
-}  // namespace
 
 struct GrammarConfig {
   int collocation_max_length = 4;
@@ -243,36 +179,30 @@ Octagram* OctagramComponent::Create(Config* config) {
 string OctagramComponent::ResolveLanguageResourceId(
     Config* config,
     const string& language) const {
-  path language_path(language);
-  if (language.empty() || language_path.is_absolute() ||
-      language_path.has_parent_path()) {
-    return language;
+#if !RIME_HAS_NAMESPACE_RESOURCE_UTILS
+  return language;
+#else
+  string schema_id;
+  if (config) {
+    config->GetString("schema/schema_id", &schema_id);
   }
-
-  const auto schema_namespace = SchemaNamespace(config);
-  if (schema_namespace.empty()) {
-    return language;
-  }
-
-  const bool namespace_only = NamespaceResourcesOnly(config);
+  const bool namespace_only = NamespaceResourcesOnlyFromConfig(config);
   the<ResourceResolver> deployed_resolver(
       Service::instance().CreateDeployedResourceResolver(kGramDbType));
   the<ResourceResolver> source_resolver(
       Service::instance().CreateResourceResolver(kGramDbType));
-
-  vector<string> candidates;
-  candidates.emplace_back(
-      (path(schema_namespace) / language_path).generic_u8string());
-  if (!namespace_only) {
-    candidates.push_back(language);
+  const auto candidates = BuildSchemaScopedResourceCandidates(
+      language, schema_id, config, namespace_only,
+      /*allow_default_namespace_fallback=*/true,
+      /*allow_parent_path_namespace_candidates=*/false);
+  string resolved_language;
+  if (ResolveFirstExistingResourcePath(candidates, deployed_resolver.get(),
+                                       source_resolver.get(),
+                                       &resolved_language)) {
+    return resolved_language;
   }
-  for (const auto& candidate : candidates) {
-    if (ExistsInResolver(deployed_resolver.get(), candidate) ||
-        ExistsInResolver(source_resolver.get(), candidate)) {
-      return candidate;
-    }
-  }
-  return candidates.front();
+  return candidates.empty() ? language : candidates.front();
+#endif
 }
 
 GramDb* OctagramComponent::GetDb(const string& language) {
